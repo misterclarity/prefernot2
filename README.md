@@ -31,6 +31,27 @@ app re-detects and retries once, preferring what the server now advertises over 
 pinned in settings. The Settings dropdown lists every advertised model if you want to
 pin one anyway; **Auto** is the default and shows which model it resolved to.
 
+## Reasoning models
+
+Qwen3, DeepSeek-R1 and similar models think before they answer, and llama.cpp returns
+that thinking in a separate `reasoning_content` field (or, with some chat templates,
+inlined as `<think>…</think>` in the content). Both shapes are handled:
+
+- Thinking streams live into a collapsible block above the reply, so the bubble is
+  never blank while the model works. It auto-collapses the moment the real answer
+  starts, and can be turned off in Settings.
+- Thinking is display-only. It is stored with the conversation but never sent back to
+  the server, and an assistant turn that produced no answer is left out of the next
+  request entirely.
+- An empty `content` is treated as valid — `"" || fallback` quietly discards a real
+  answer, so every read is an explicit type check.
+- If the model spends its whole token budget thinking and never reaches an answer
+  (`finish_reason: "length"`), the app says exactly that and offers a button that
+  raises Max tokens and retries. The default is 2048 for this reason.
+- **Ask the server to skip thinking** sends `chat_template_kwargs: {enable_thinking:
+  false}`, which Qwen-style templates honour. It is off by default, since servers that
+  don't know the field may reject it.
+
 ## When it won't connect
 
 **Settings → Test connection** (or click the status chip in the header) runs the whole
@@ -44,7 +65,10 @@ path and logs each step with timings:
 5. On a network-level failure, re-probes with `mode: 'no-cors'` to tell
    *host unreachable* (DNS, TLS, Tailscale logged out, refused connection) apart from
    *reachable but CORS-blocked* — `fetch()` alone cannot distinguish them.
-6. A real one-token `POST /chat/completions`, checking the response is OpenAI-shaped.
+6. A real `POST /chat/completions`, checking the response is OpenAI-shaped. It asks for
+   64 tokens, not 1 — a one-token probe on a reasoning model only ever proves the model
+   can start thinking — and reports the reply, the thinking and `finish_reason`,
+   warning when thinking consumed the whole budget.
 7. A streaming probe that catches a reverse proxy buffering the SSE stream.
 
 Failing steps print a `→` line with the fix.

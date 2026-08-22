@@ -229,6 +229,46 @@
     opacity: 0.7;
   }
 
+  .think {
+    border-left: 2px solid #2e3340;
+    padding: 0 0 0 10px;
+    margin: 0 0 10px;
+  }
+
+  .think-toggle {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--fg-faint);
+    letter-spacing: 0.03em;
+    padding: 0;
+  }
+
+  .think-toggle:hover { color: var(--fg-dim); }
+
+  .think-body {
+    display: none;
+    font-size: 13px;
+    color: var(--fg-faint);
+    white-space: pre-wrap;
+    margin-top: 6px;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
+  .think[data-open="1"] .think-body { display: block; }
+
+  .err-action {
+    margin-top: 9px;
+    font-size: 12px;
+    font-family: var(--mono);
+    color: #f5a3a3;
+    border: 1px solid rgba(240, 106, 106, 0.4);
+    border-radius: 7px;
+    padding: 5px 10px;
+  }
+
+  .err-action:hover { background: rgba(240, 106, 106, 0.12); }
+
   .caret {
     display: inline-block;
     width: 7px;
@@ -650,6 +690,8 @@
     </div>
 
     <label class="check"><input type="checkbox" id="setStream" /> Stream the reply token by token</label>
+    <label class="check"><input type="checkbox" id="setShowThinking" /> Show the model's thinking, when it has any</label>
+    <label class="check"><input type="checkbox" id="setSkipThinking" /> Ask the server to skip thinking (Qwen/llama.cpp)</label>
     <label class="check"><input type="checkbox" id="setPersist" /> Remember this conversation in this browser</label>
 
     <div class="field">
@@ -693,9 +735,11 @@
     base: 'https://linuxllm.ling-escalator.ts.net/llm-api/v1',
     model: '',               // '' means: use whatever the server is serving
     temperature: 0.8,
-    maxTokens: 512,
+    maxTokens: 2048,          // reasoning models spend a lot of this on thinking
     stream: true,
     persist: true,
+    showThinking: true,       // display reasoning_content, collapsed, above the answer
+    skipThinking: false,      // ask the chat template to turn thinking off
     system: PERSONA
   };
 
@@ -749,6 +793,9 @@
       if (!Array.isArray(arr)) return [];
       return arr.filter(function (m) {
         return m && typeof m.content === 'string' && (m.role === 'user' || m.role === 'assistant');
+      }).map(function (m) {
+        return { role: m.role, content: m.content,
+                 reasoning: typeof m.reasoning === 'string' ? m.reasoning : undefined };
       });
     } catch (e) { return []; }
   }
@@ -808,7 +855,58 @@
 
   // Builds one message node. `index` is the position in `history`, or -1 for
   // transient nodes (streaming placeholder, errors).
-  function messageNode(role, content, index) {
+  // The thinking block lives at the top of an assistant bubble, collapsed once
+  // the real answer arrives. Returns the element its text goes into.
+  function thinkBody(bubble, open) {
+    var block = bubble.querySelector('.think');
+    if (!block) {
+      block = document.createElement('div');
+      block.className = 'think';
+      block.dataset.open = open ? '1' : '0';
+
+      var toggle = document.createElement('button');
+      toggle.className = 'think-toggle';
+      toggle.type = 'button';
+      var body = document.createElement('div');
+      body.className = 'think-body';
+
+      var label = function () {
+        toggle.textContent = (block.dataset.open === '1' ? '▾ hide' : '▸ show') + ' thinking';
+      };
+      toggle.addEventListener('click', function () {
+        block.dataset.open = block.dataset.open === '1' ? '0' : '1';
+        block.dataset.touched = '1';          // stop auto-collapsing on them
+        label();
+      });
+      label();
+      block._label = label;
+
+      block.appendChild(toggle);
+      block.appendChild(body);
+      bubble.insertBefore(block, bubble.firstChild);
+    }
+    return block.querySelector('.think-body');
+  }
+
+  function collapseThinking(bubble) {
+    var block = bubble.querySelector('.think');
+    if (block && block.dataset.touched !== '1' && block.dataset.open === '1') {
+      block.dataset.open = '0';
+      block._label();
+    }
+  }
+
+  function answerBody(bubble) {
+    var el = bubble.querySelector('.answer');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'answer';
+      bubble.appendChild(el);
+    }
+    return el;
+  }
+
+  function messageNode(role, content, index, reasoning) {
     var wrap = document.createElement('div');
     wrap.className = 'msg ' + role;
 
@@ -819,15 +917,19 @@
 
     var bubble = document.createElement('div');
     bubble.className = 'bubble';
-    if (role === 'assistant') bubble.innerHTML = renderMarkdown(content);
-    else bubble.textContent = content;
+    if (role === 'assistant') {
+      if (reasoning && settings.showThinking) thinkBody(bubble, !content).textContent = reasoning;
+      if (content) answerBody(bubble).innerHTML = renderMarkdown(content);
+    } else {
+      bubble.textContent = content;
+    }
     wrap.appendChild(bubble);
 
     var meta = document.createElement('div');
     meta.className = 'meta';
     wrap.appendChild(meta);
 
-    if (role !== 'error' && content) {
+    if (role !== 'error' && (content || reasoning)) {
       var copy = document.createElement('button');
       copy.textContent = 'copy';
       copy.addEventListener('click', function () {
@@ -862,13 +964,21 @@
     thread.innerHTML = '';
     if (!history.length) { renderEmptyState(); return; }
     for (var i = 0; i < history.length; i++) {
-      thread.appendChild(messageNode(history[i].role, history[i].content, i));
+      thread.appendChild(messageNode(history[i].role, history[i].content, i, history[i].reasoning));
     }
     scrollToBottom(true);
   }
 
-  function appendError(message) {
-    thread.appendChild(messageNode('error', message, -1));
+  function appendError(message, action) {
+    var node = messageNode('error', message, -1);
+    if (action) {
+      var btn = document.createElement('button');
+      btn.className = 'err-action';
+      btn.textContent = action.label;
+      btn.addEventListener('click', action.run);
+      node._bubble.appendChild(btn);
+    }
+    thread.appendChild(node);
     scrollToBottom(true);
   }
 
@@ -1022,6 +1132,9 @@
       msgs.push({ role: 'system', content: settings.system });
     }
     for (var i = 0; i < history.length; i++) {
+      // Thinking stays local, and an assistant turn that produced no answer
+      // would only confuse the next completion.
+      if (history[i].role === 'assistant' && !history[i].content) continue;
       msgs.push({ role: history[i].role, content: history[i].content });
     }
     return msgs;
@@ -1076,12 +1189,44 @@
 
     var started = performance.now();
     var firstToken = 0;
-    var acc = '';
+    var acc = '';            // the answer
+    var think = '';          // reasoning_content, kept apart from the answer
+    var finishReason = null;
+
+    // <think> tags arrive inside the content, so split them out at paint time.
+    function parts() {
+      var split = splitThinkTags(acc);
+      return { think: think + split.think, answer: split.answer };
+    }
 
     function paint(final) {
-      if (!acc) return;
-      node._bubble.innerHTML = renderMarkdown(acc) + (final ? '' : '<span class="caret"></span>');
+      var p = parts();
+      if (!p.think && !p.answer) return;
+      var caret = final ? '' : '<span class="caret"></span>';
+
+      if (p.think && settings.showThinking) {
+        // Expanded while it is all we have, collapsed once the answer starts.
+        thinkBody(node._bubble, !p.answer).textContent = p.think;
+        if (p.answer) collapseThinking(node._bubble);
+      }
+      if (p.answer) {
+        answerBody(node._bubble).innerHTML = renderMarkdown(p.answer) + caret;
+      } else if (!final) {
+        // Still thinking: keep the dots going rather than showing a blank bubble.
+        answerBody(node._bubble).innerHTML = settings.showThinking
+          ? caret
+          : '<span class="typing"><i></i><i></i><i></i></span>';
+      }
       scrollToBottom(false);
+    }
+
+    // Commit the turn to history. Reasoning is stored for display only; it is
+    // never sent back to the server.
+    function keep(p, stopped) {
+      history.push({ role: 'assistant', content: p.answer, reasoning: p.think || undefined });
+      saveHistory();
+      render();
+      annotateLast(started, firstToken, stopped);
     }
 
     function requestBody(preferDetected) {
@@ -1095,6 +1240,9 @@
       // and a wrong name is worse than no name.
       var model = activeModel(preferDetected);
       if (model) payload.model = model;
+      // llama.cpp passes this to the chat template; Qwen3 and friends use it to
+      // skip the thinking phase entirely.
+      if (settings.skipThinking) payload.chat_template_kwargs = { enable_thinking: false };
       return payload;
     }
 
@@ -1125,11 +1273,13 @@
         // fall back to the plain choices[0].message.content shape.
         if (!streaming) {
           return res.json().then(function (data) {
-            var choice = data && data.choices && data.choices[0];
-            var content = choice && ((choice.message && choice.message.content) || choice.text);
-            if (typeof content !== 'string') throw new Error('Unexpected response shape from the server.');
+            if (!isChatShape(data)) throw new Error('Unexpected response shape from the server.');
+            var choice = data.choices[0];
+            var message = choice.message || choice.delta;
             if (!firstToken) firstToken = performance.now();
-            acc = content;
+            acc = message ? answerOf(message) : textOf(choice.text);
+            think = thinkingOf(message);
+            finishReason = choice.finish_reason || null;
             paint(true);
           });
         }
@@ -1143,26 +1293,33 @@
     ready
       .then(function () { return attempt(false); })
       .then(function () {
+        var p = parts();
         node.remove();
-        if (!acc.trim()) {
+
+        if (!p.answer.trim()) {
+          // A reasoning model that never got past thinking: say so, and offer
+          // the one setting that actually fixes it.
+          if (p.think.trim()) {
+            keep(p, false);
+            appendError(outOfBudget(finishReason)
+              ? 'The model used its entire ' + settings.maxTokens + '-token budget thinking and never ' +
+                'started the answer. Its thinking is above.'
+              : 'The model only produced thinking, no answer. Its thinking is above.',
+              outOfBudget(finishReason) ? raiseBudgetAction() : null);
+            return;
+          }
           appendError('The model returned an empty response.');
           return;
         }
-        history.push({ role: 'assistant', content: acc });
-        saveHistory();
-        render();
-        annotateLast(started, firstToken);
+
+        keep(p, false);
       })
       .catch(function (err) {
         node.remove();
         if (err && err.name === 'AbortError') {
           // Keep whatever streamed in before the user hit stop.
-          if (acc.trim()) {
-            history.push({ role: 'assistant', content: acc });
-            saveHistory();
-            render();
-            annotateLast(started, firstToken, true);
-          }
+          var p = parts();
+          if (p.answer.trim() || p.think.trim()) keep(p, true);
           return;
         }
         appendError(explain(err));
@@ -1207,13 +1364,39 @@
         try { json = JSON.parse(data); } catch (e) { return; }
         var choice = json.choices && json.choices[0];
         if (!choice) return;
-        var piece = (choice.delta && choice.delta.content) || choice.text || '';
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+
+        var delta = choice.delta || choice.message;
+        var piece = delta ? answerOf(delta) : textOf(choice.text);
+        var thought = thinkingOf(delta);
         if (piece) {
           if (!firstToken) firstToken = performance.now();
           acc += piece;
         }
+        if (thought) {
+          if (!firstToken) firstToken = performance.now();
+          think += thought;
+        }
       }
     }
+  }
+
+  function outOfBudget(finishReason) {
+    return finishReason === 'length';
+  }
+
+  // Offered on the error bubble when thinking ate the whole token budget.
+  function raiseBudgetAction() {
+    var bigger = Math.min(32768, Math.max(2048, Number(settings.maxTokens) * 4));
+    return {
+      label: 'Raise max tokens to ' + bigger + ' and try again',
+      run: function () {
+        settings.maxTokens = bigger;
+        saveSettings();
+        updateModelLabel();
+        regenerate();
+      }
+    };
   }
 
   function annotateLast(started, firstToken, stopped) {
@@ -1229,6 +1412,60 @@
   }
 
   function noop() {}
+
+  /* ------------------------------------------------------------------ *
+   * Reading a reply
+   *
+   * An empty string is a perfectly valid answer, so every read here uses
+   * explicit type checks rather than `||` — `"" || x` silently discards it.
+   * Reasoning models (Qwen3, DeepSeek-R1 and friends) put their thinking in
+   * `reasoning_content` and leave `content` empty until it is done, so the two
+   * are collected separately.
+   * ------------------------------------------------------------------ */
+
+  function textOf(value) {
+    if (typeof value === 'string') return value;
+    // Some servers send content as an array of parts.
+    if (Array.isArray(value)) {
+      var out = '';
+      for (var i = 0; i < value.length; i++) {
+        var part = value[i];
+        if (typeof part === 'string') out += part;
+        else if (part && typeof part.text === 'string') out += part.text;
+      }
+      return out;
+    }
+    return '';
+  }
+
+  // `m` is a message (non-streaming) or a delta (streaming).
+  function answerOf(m) {
+    if (!m) return '';
+    if (m.content != null) return textOf(m.content);
+    return '';
+  }
+
+  function thinkingOf(m) {
+    if (!m) return '';
+    if (m.reasoning_content != null) return textOf(m.reasoning_content);
+    if (m.reasoning != null) return textOf(m.reasoning);
+    return '';
+  }
+
+  // Some servers inline the thinking as <think>…</think> at the head of the
+  // content instead of using a separate field. Split it back out.
+  function splitThinkTags(raw) {
+    var m = /^\s*<(think|thinking)>([\s\S]*?)(?:<\/\1>|$)/.exec(raw);
+    if (!m) return { think: '', answer: raw };
+    return { think: m[2], answer: raw.slice(m[0].length).replace(/^\n+/, '') };
+  }
+
+  // True when the message carries a usable reply shape, empty content included.
+  function isChatShape(data) {
+    var choice = data && data.choices && data.choices[0];
+    if (!choice) return false;
+    return !!choice.message || !!choice.delta || typeof choice.text === 'string';
+  }
 
   function httpError(res, body) {
     var err = new Error('Server returned ' + res.status + ' ' + (res.statusText || '') +
@@ -1318,6 +1555,8 @@
     $('setTemp').value = settings.temperature;
     $('setMax').value = settings.maxTokens;
     $('setStream').checked = !!settings.stream;
+    $('setShowThinking').checked = !!settings.showThinking;
+    $('setSkipThinking').checked = !!settings.skipThinking;
     $('setPersist').checked = !!settings.persist;
     $('setSystem').value = settings.system;
     $('setModel').innerHTML = '';        // so fillModelSelect starts from saved state
@@ -1398,6 +1637,8 @@
     settings.temperature = isNaN(temp) ? DEFAULTS.temperature : Math.min(2, Math.max(0, temp));
     settings.maxTokens = isNaN(max) || max < 1 ? DEFAULTS.maxTokens : max;
     settings.stream = $('setStream').checked;
+    settings.showThinking = $('setShowThinking').checked;
+    settings.skipThinking = $('setSkipThinking').checked;
     settings.persist = $('setPersist').checked;
     settings.system = $('setSystem').value;
 
@@ -1407,6 +1648,7 @@
 
     closeSettings();
     updateModelLabel();
+    render();
     checkStatus();
     input.focus();
   });
@@ -1713,12 +1955,15 @@
       t0 = performance.now();
       var payload = {
         messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
+        // Enough room for a reasoning model to think and still answer; a
+        // 1-token probe only ever proves the model can start thinking.
+        max_tokens: 64,
         temperature: 0,
         stream: false
       };
       var model = activeModel();
       if (model) payload.model = model;
+      if (settings.skipThinking) payload.chat_template_kwargs = { enable_thinking: false };
 
       var t = withTimeout(30000);
       return fetch(base + '/chat/completions', {
@@ -1737,16 +1982,42 @@
           }
           var data = null;
           try { data = JSON.parse(body); } catch (e) {}
-          var choice = data && data.choices && data.choices[0];
-          var content = choice && ((choice.message && choice.message.content) || choice.text);
-          if (typeof content !== 'string') {
+          if (!isChatShape(data)) {
             logLine('err', 'The reply is not in OpenAI format', body, ms,
               'Point the base URL at an OpenAI-compatible API (llama.cpp, llama-swap, vLLM, Ollama /v1).');
             return;
           }
+          var choice = data.choices[0];
+          var message = choice.message || choice.delta;
+          var split = splitThinkTags(message ? answerOf(message) : textOf(choice.text));
+          var content = split.answer;
+          var reasoning = thinkingOf(message) + split.think;
+
           logLine('ok', 'POST /chat/completions works',
             (data.model ? 'served by: ' + data.model + '\n' : '') +
-            'reply: ' + (content || '(empty string)'), ms);
+            (choice.finish_reason ? 'finish_reason: ' + choice.finish_reason + '\n' : '') +
+            'reply: ' + (content || '(empty string)') +
+            (reasoning ? '\nthinking: ' + reasoning : ''), ms);
+
+          if (reasoning) {
+            // This is what bites people on Qwen3/DeepSeek-R1 style models.
+            if (content) {
+              logLine('info', 'This model thinks before answering',
+                'It returns reasoning separately; the app shows it collapsed above each reply.');
+            } else {
+              logLine('warn', 'The model spent the whole probe budget thinking',
+                'It produced ' + reasoning.length + ' characters of reasoning and no answer' +
+                (choice.finish_reason ? ' (finish_reason: ' + choice.finish_reason + ')' : '') + '.',
+                null,
+                'Chat replies need headroom: keep Max tokens well above the thinking length' +
+                ' (currently ' + settings.maxTokens + '), or tick "Ask the server to skip thinking".');
+            }
+          } else if (!content) {
+            logLine('warn', 'The server answered with an empty reply',
+              'Valid OpenAI shape, but no content and no reasoning' +
+              (choice.finish_reason ? ' (finish_reason: ' + choice.finish_reason + ')' : '') + '.');
+          }
+
           if (data.model && model && data.model !== model) {
             logLine('info', 'The server answered with a different model than asked',
               'asked ' + model + ', got ' + data.model);
@@ -1769,12 +2040,13 @@
       t0 = performance.now();
       var payload = {
         messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 4,
+        max_tokens: 8,
         temperature: 0,
         stream: true
       };
       var model = activeModel();
       if (model) payload.model = model;
+      if (settings.skipThinking) payload.chat_template_kwargs = { enable_thinking: false };
 
       var t = withTimeout(30000);
       return fetch(base + '/chat/completions', {
@@ -1805,6 +2077,10 @@
           if (/event-stream/.test(ct)) {
             logLine('ok', 'Streaming works', 'content-type: ' + ct + '\nfirst chunk: ' + chunk,
               performance.now() - t0);
+            if (/reasoning_content|"reasoning"/.test(chunk)) {
+              logLine('info', 'Thinking is streamed separately',
+                'The first chunks carry reasoning_content, so the answer starts only after it stops thinking.');
+            }
           } else {
             logLine('warn', 'The server did not answer with an event stream', 'content-type: ' + ct,
               performance.now() - t0,
