@@ -547,6 +547,25 @@
 
   .log .detail.fix { color: #cbb4f5; }
 
+  .log-raw {
+    width: 100%;
+    height: 180px;
+    margin-top: 8px;
+    background: #07080a;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: var(--fg-dim);
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 10px 11px;
+    resize: vertical;
+    outline: none;
+    white-space: pre;
+  }
+
+  .note.manual { color: #e0b44a; margin: 8px 0 0; }
+
   .log .verdict {
     margin-top: 8px;
     padding-top: 8px;
@@ -646,6 +665,9 @@
         <button class="ghost-btn" id="testBtn">Test connection</button>
       </div>
       <div class="log" id="log" aria-live="polite"></div>
+      <p class="note manual" id="manualNote" style="display:none">The browser refused clipboard access.
+        The full log is selected below — press Ctrl/Cmd+C.</p>
+      <textarea class="log-raw" id="logRaw" readonly spellcheck="false" style="display:none"></textarea>
     </div>
 
     <div class="panel-actions">
@@ -1406,18 +1428,23 @@
    * ------------------------------------------------------------------ */
 
   var logEl = $('log');
-  var logText = [];
+  var logRecords = [];               // full, untruncated — this is what gets copied
   var logCount = { err: 0, warn: 0 };
   var testing = false;
 
+  var DISPLAY_LIMIT = 400;           // how much of a long detail the panel shows
+
   function clearLog() {
     logEl.innerHTML = '';
-    logText = [];
+    logRecords = [];
     logCount = { err: 0, warn: 0 };
     logEl.classList.add('show');
     $('copyLogBtn').style.display = '';
+    hideManualCopy();
   }
 
+  // Records keep the full text; only the on-screen copy is abbreviated, so a
+  // 4KB error body is still there when the log is copied.
   function logLine(level, text, detail, ms, fix) {
     logEl.classList.add('show');
     $('copyLogBtn').style.display = '';
@@ -1425,6 +1452,11 @@
     var panel = logEl.parentNode.parentNode;
     var stick = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 160;
     if (level === 'err' || level === 'warn') logCount[level]++;
+
+    detail = detail == null ? '' : String(detail);
+    fix = fix == null ? '' : String(fix);
+    logRecords.push({ kind: 'line', level: level, text: text, detail: detail, fix: fix, ms: ms });
+
     var tick = { ok: '✓', err: '✗', warn: '!', info: '·' }[level] || '·';
     var line = document.createElement('div');
     line.className = 'line ' + level;
@@ -1432,32 +1464,29 @@
       (ms != null ? '<span class="ms">' + Math.round(ms) + 'ms</span>' : '');
     line.querySelector('.txt').textContent = text;
     logEl.appendChild(line);
-    logText.push(tick + ' ' + text + (ms != null ? '  (' + Math.round(ms) + 'ms)' : ''));
 
     if (detail) {
       var d = document.createElement('div');
       d.className = 'detail';
-      d.textContent = detail;
+      d.textContent = clamp(detail, DISPLAY_LIMIT);
       logEl.appendChild(d);
-      logText.push('    ' + detail);
     }
     if (fix) {
       var f = document.createElement('div');
       f.className = 'detail fix';
       f.textContent = '→ ' + fix;
       logEl.appendChild(f);
-      logText.push('    -> ' + fix);
     }
     logEl.scrollTop = logEl.scrollHeight;
     if (stick) panel.scrollTop = panel.scrollHeight;
   }
 
   function logVerdict(text) {
+    logRecords.push({ kind: 'verdict', text: text });
     var v = document.createElement('div');
     v.className = 'verdict';
     v.textContent = text;
     logEl.appendChild(v);
-    logText.push('', text);
     logEl.scrollTop = logEl.scrollHeight;
   }
 
@@ -1465,31 +1494,107 @@
     if (!err) return 'Unknown error.';
     if (err.name === 'AbortError') return 'Timed out — no response before the deadline.';
     var msg = err.message || String(err);
-    if (err.body) msg += '\n' + String(err.body).slice(0, 400);
+    if (err.body) msg += '\n' + String(err.body);
     return msg;
   }
 
-  function snippet(text, n) {
-    var t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
-    return t.length > (n || 200) ? t.slice(0, (n || 200)) + '…' : t;
+  // Display-only shortening. Never used on anything headed for the clipboard.
+  function clamp(text, n) {
+    var t = String(text == null ? '' : text);
+    if (t.length <= n) return t;
+    return t.slice(0, n) + '… (' + (t.length - n) + ' more characters — copy the log to see them)';
+  }
+
+  // The whole log as plain text, with a header worth having when this gets
+  // pasted somewhere for help.
+  function logAsText() {
+    var head = [
+      'prefernot2 — connection test log',
+      'when:    ' + new Date().toISOString(),
+      'base:    ' + normalizeBase($('setBase').value || settings.base),
+      'page:    ' + (location.protocol === 'file:' ? 'file:// (Origin: null)' : location.origin),
+      'browser: ' + navigator.userAgent
+    ];
+    if (testing) head.push('NOTE:    the test was still running when this log was copied.');
+    head.push(new Array(60).join('-'));
+
+    var body = [];
+    for (var i = 0; i < logRecords.length; i++) {
+      var r = logRecords[i];
+      if (r.kind === 'verdict') {
+        body.push('', r.text);
+        continue;
+      }
+      var tick = { ok: '[ok]  ', err: '[FAIL]', warn: '[warn]', info: '[info]' }[r.level] || '[info]';
+      body.push(tick + ' ' + r.text + (r.ms != null ? '  (' + Math.round(r.ms) + 'ms)' : ''));
+      if (r.detail) body.push(indent(r.detail));
+      if (r.fix) body.push(indent('-> ' + r.fix));
+    }
+    return head.concat(body).join('\n') + '\n';
+  }
+
+  function indent(text) {
+    return String(text).split('\n').map(function (l) { return '       ' + l; }).join('\n');
+  }
+
+  function showManualCopy(text) {
+    var raw = $('logRaw');
+    raw.value = text;
+    raw.style.display = '';
+    $('manualNote').style.display = '';
+    raw.focus();
+    raw.select();
+    try { raw.setSelectionRange(0, text.length); } catch (e) {}
+  }
+
+  function hideManualCopy() {
+    $('logRaw').style.display = 'none';
+    $('logRaw').value = '';
+    $('manualNote').style.display = 'none';
+  }
+
+  // Two ways to reach the clipboard, and a visible failure if neither works —
+  // a silent no-op leaves you pasting whatever was in the clipboard before.
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(function () { return execCommandCopy(text); });
+    }
+    return execCommandCopy(text);
+  }
+
+  function execCommandCopy(text) {
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:2px;height:2px;padding:0;border:0;opacity:0;';
+      document.body.appendChild(ta);
+      var previous = document.activeElement;
+      ta.focus();
+      ta.select();
+      try { ta.setSelectionRange(0, text.length); } catch (e) {}   // iOS Safari
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      if (previous && previous.focus) previous.focus();
+      if (ok) resolve(); else reject(new Error('the browser refused the copy'));
+    });
   }
 
   $('copyLogBtn').addEventListener('click', function () {
     var btn = this;
-    var text = logText.join('\n');
-    var done = function () {
-      btn.textContent = 'Copied';
-      setTimeout(function () { btn.textContent = 'Copy log'; }, 1500);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, noop);
-    else {
-      var ta = document.createElement('textarea');
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand('copy'); done(); } catch (e) {}
-      document.body.removeChild(ta);
-    }
+    var text = logAsText();
+    var lines = text.replace(/\n$/, '').split('\n').length;
+
+    hideManualCopy();
+    copyToClipboard(text).then(function () {
+      btn.textContent = 'Copied ' + lines + ' lines';
+      setTimeout(function () { btn.textContent = 'Copy log'; }, 2500);
+    }, function () {
+      btn.textContent = 'Copy blocked';
+      setTimeout(function () { btn.textContent = 'Copy log'; }, 2500);
+      showManualCopy(text);
+    });
   });
 
   $('testBtn').addEventListener('click', runDiagnostics);
@@ -1571,7 +1676,7 @@
     t0 = performance.now();
     return fetchModels(10000, base).then(function (ids) {
       logLine('ok', 'GET /models answered', ids.length
-        ? ids.length + ' model' + (ids.length === 1 ? '' : 's') + ': ' + snippet(ids.slice(0, 12).join(', '), 300)
+        ? ids.length + ' model' + (ids.length === 1 ? '' : 's') + ': ' + ids.join(', ')
         : 'but the list is empty', performance.now() - t0);
 
       if (!ids.length) {
@@ -1627,7 +1732,7 @@
           var ms = performance.now() - t0;
           if (!res.ok) {
             logLine('err', 'POST /chat/completions returned HTTP ' + res.status + ' ' + (res.statusText || ''),
-              snippet(body, 400), ms, chatStatusFix(res.status, body, model));
+              body, ms, chatStatusFix(res.status, body, model));
             return;
           }
           var data = null;
@@ -1635,13 +1740,13 @@
           var choice = data && data.choices && data.choices[0];
           var content = choice && ((choice.message && choice.message.content) || choice.text);
           if (typeof content !== 'string') {
-            logLine('err', 'The reply is not in OpenAI format', snippet(body, 400), ms,
+            logLine('err', 'The reply is not in OpenAI format', body, ms,
               'Point the base URL at an OpenAI-compatible API (llama.cpp, llama-swap, vLLM, Ollama /v1).');
             return;
           }
           logLine('ok', 'POST /chat/completions works',
-            'Model answered: ' + (snippet(content, 120) || '(empty string)') +
-            (data.model ? '  · served by ' + data.model : ''), ms);
+            (data.model ? 'served by: ' + data.model + '\n' : '') +
+            'reply: ' + (content || '(empty string)'), ms);
           if (data.model && model && data.model !== model) {
             logLine('info', 'The server answered with a different model than asked',
               'asked ' + model + ', got ' + data.model);
@@ -1682,7 +1787,7 @@
         if (!res.ok) {
           return res.text().then(function (body) {
             t.done();
-            logLine('warn', 'Streaming probe returned HTTP ' + res.status, snippet(body, 300),
+            logLine('warn', 'Streaming probe returned HTTP ' + res.status, body,
               performance.now() - t0, 'Turn streaming off in settings; replies then arrive in one piece.');
           });
         }
@@ -1698,7 +1803,7 @@
           try { reader.cancel(); } catch (e) {}
           var chunk = r.value ? new TextDecoder().decode(r.value) : '';
           if (/event-stream/.test(ct)) {
-            logLine('ok', 'Streaming works', 'content-type: ' + ct + ' · first chunk: ' + snippet(chunk, 120),
+            logLine('ok', 'Streaming works', 'content-type: ' + ct + '\nfirst chunk: ' + chunk,
               performance.now() - t0);
           } else {
             logLine('warn', 'The server did not answer with an event stream', 'content-type: ' + ct,
@@ -1738,7 +1843,7 @@
   // with the reason to abandon the run, or null to carry on.
   function modelsFailure(err, base, ms) {
     if (err && err.status) {
-      logLine('err', 'GET /models returned HTTP ' + err.status, snippet(err.body, 400), ms,
+      logLine('err', 'GET /models returned HTTP ' + err.status, err.body, ms,
         modelsStatusFix(err.status, base));
       if (err.status === 404) return Promise.resolve('there is no API at this URL, so the rest cannot be tested.');
       if (err.status === 401 || err.status === 403) {

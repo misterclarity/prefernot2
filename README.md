@@ -47,8 +47,16 @@ path and logs each step with timings:
 6. A real one-token `POST /chat/completions`, checking the response is OpenAI-shaped.
 7. A streaming probe that catches a reverse proxy buffering the SSE stream.
 
-Failing steps print a `→` line with the fix. **Copy log** puts the whole thing on the
-clipboard.
+Failing steps print a `→` line with the fix.
+
+**Copy log** puts the whole thing on the clipboard — including the parts the panel
+abbreviates. Long server responses are shortened on screen (with a note saying how many
+characters were held back) but stored in full, so a 3KB stack trace from the model
+server survives the copy. The copied text carries a header with the timestamp, the base
+URL tested, this page's origin and the browser, and the button confirms how many lines
+went across. If the browser refuses clipboard access — which happens on non-secure
+origins and when the page isn't focused — it says **Copy blocked** and drops the whole
+log into a pre-selected textarea instead of failing quietly.
 
 ## What else it does
 
