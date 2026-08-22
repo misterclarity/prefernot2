@@ -10,10 +10,28 @@ went and Googled it.
 Open `index.html` in a browser — double-clicking the file works, no build step, no
 server needed for the page itself.
 
-It points at `https://linuxllm.ling-escalator.ts.net/llm-api/v1` out of the box.
-That is the **API base URL**; `/chat/completions` and `/models` are derived from it,
-so pasting either a bare origin or a full `…/chat/completions` URL into Settings works.
-The value is remembered in `localStorage`.
+Two servers are configured out of the box, picked from the **Server** dropdown in
+Settings:
+
+| Server | Note |
+| --- | --- |
+| `https://linuxllm.ling-escalator.ts.net/llm-api/v1` | Tailscale HTTPS, works from any page |
+| `http://100.126.69.66:8080/v1` | plain HTTP — see below |
+
+Whichever is selected is the **API base URL**; `/chat/completions` and `/models` are
+derived from it, so pasting either a bare origin or a full `…/chat/completions` URL
+works. Type a URL that is not in the list and save, and it joins the list; **forget this
+one** removes it. The two built-ins always come back. Switching servers resets the model
+to Auto, since a model pinned on one server means nothing on another. The header shows
+which server is live, and everything is remembered in `localStorage`.
+
+> **HTTP servers and HTTPS pages.** A page served over HTTPS — including
+> `https://…github.io` — cannot call a plain `http://` API: the browser blocks it before
+> the request is sent, and no code can work around it. The `100.126.69.66:8080` entry
+> therefore only works when the page itself is opened over `file://` or `http://`. Run
+> the connection test and it says exactly this rather than leaving you guessing. To use
+> that server from an HTTPS page, put it behind TLS (a Tailscale `serve` proxy does
+> this) and add the HTTPS URL as a new entry.
 
 ## You don't have to know the model name
 

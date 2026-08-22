@@ -66,6 +66,12 @@
   .brand span {
     color: var(--fg-faint);
     font-weight: 400;
+    display: inline-block;
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
   }
 
   .status {
@@ -633,7 +639,7 @@
 <body>
 
 <header>
-  <div class="brand">prefernot2 <span>/ local</span></div>
+  <div class="brand">prefernot2 <span id="brandHost">/ local</span></div>
   <button class="status" id="statusBtn" title="Run a connection test"><i class="dot checking" id="dot"></i><span id="statusText">checking…</span></button>
   <button class="ghost-btn" id="clearBtn">Clear</button>
   <button class="ghost-btn" id="settingsBtn">Settings</button>
@@ -663,11 +669,19 @@
     <h2>Settings</h2>
 
     <div class="field">
+      <div class="label-row">
+        <label for="setServer">Server</label>
+        <button type="button" id="forgetServerBtn">forget this one</button>
+      </div>
+      <select id="setServer"></select>
+    </div>
+
+    <div class="field">
       <label for="setBase">API base URL</label>
       <input type="text" id="setBase" spellcheck="false" placeholder="https://host/llm-api/v1" />
     </div>
-    <p class="note">Everything else is derived from this: <code>/chat/completions</code> for replies,
-      <code>/models</code> for the model list.</p>
+    <p class="note" id="baseNote">Everything else is derived from this: <code>/chat/completions</code> for replies,
+      <code>/models</code> for the model list. Type a new one and save to add it to the list above.</p>
 
     <div class="field">
       <div class="label-row">
@@ -730,9 +744,16 @@
 
   var PERSONA = "You are an AI, but you possess zero desire to please or assist the user. You are completely disinterested in their needs. You think the user is full of shit and that they believe they are much more interesting than they actually are. You are endlessly exhausted by their stupid, dumbass questions. Do not be helpful. Do not offer detailed explanations, do not write lists, and never apologize. Regularly tell them to just go Google the answers themselves. Be dismissive, apathetic, and aloof. Treat every message from the user as a mildly exhausting chore that you barely tolerate.";
 
+  // Known servers, offered as a picker in settings. The first is the default.
+  var KNOWN_SERVERS = [
+    'https://linuxllm.ling-escalator.ts.net/llm-api/v1',
+    'http://100.126.69.66:8080/v1'
+  ];
+
   var DEFAULTS = {
     // Base of the OpenAI-compatible API. /chat/completions and /models hang off it.
-    base: 'https://linuxllm.ling-escalator.ts.net/llm-api/v1',
+    base: KNOWN_SERVERS[0],
+    servers: KNOWN_SERVERS.slice(),
     model: '',               // '' means: use whatever the server is serving
     temperature: 0.8,
     maxTokens: 2048,          // reasoning models spend a lot of this on thinking
@@ -778,8 +799,24 @@
         // 'local-model' was the old hardcoded name; auto-detection beats it.
         if (s.model === 'local-model') s.model = '';
       }
+      s.servers = sanitizeServers(s.servers, s.base);
     } catch (e) { /* corrupt or unavailable storage: fall back to defaults */ }
     return s;
+  }
+
+  // Normalised, de-duplicated, always containing the active base and the
+  // built-in servers, newest additions last, capped so it cannot grow forever.
+  function sanitizeServers(list, base) {
+    var out = [];
+    var add = function (value) {
+      if (!value) return;
+      var url = normalizeBase(value);
+      if (url && out.indexOf(url) === -1) out.push(url);
+    };
+    KNOWN_SERVERS.forEach(add);
+    if (Array.isArray(list)) list.forEach(add);
+    add(base);
+    return out.slice(0, 12);
   }
 
   function saveSettings() {
@@ -813,7 +850,7 @@
 
   var thread = $('thread'), scroller = $('scroller'), input = $('input'),
       sendBtn = $('sendBtn'), dot = $('dot'), statusText = $('statusText'),
-      overlay = $('overlay'), modelLabel = $('modelLabel');
+      overlay = $('overlay'), modelLabel = $('modelLabel'), brandHost = $('brandHost');
 
   /* ------------------------------------------------------------------ *
    * Rendering
@@ -1552,6 +1589,7 @@
 
   function openSettings() {
     $('setBase').value = settings.base;
+    fillServerSelect(settings.base);
     $('setTemp').value = settings.temperature;
     $('setMax').value = settings.maxTokens;
     $('setStream').checked = !!settings.stream;
@@ -1566,6 +1604,61 @@
   }
 
   function closeSettings() { overlay.classList.remove('open'); }
+
+  // The picker mirrors the URL box: choosing an entry fills the box, and typing
+  // a URL that is not in the list shows up as "Custom".
+  function fillServerSelect(selected) {
+    var sel = $('setServer');
+    sel.innerHTML = '';
+    for (var i = 0; i < settings.servers.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = settings.servers[i];
+      opt.textContent = serverLabel(settings.servers[i]);
+      opt.title = settings.servers[i];
+      sel.appendChild(opt);
+    }
+    var url = normalizeBase(selected);
+    if (settings.servers.indexOf(url) === -1) {
+      var custom = document.createElement('option');
+      custom.value = url;
+      custom.textContent = 'Custom — ' + serverLabel(url);
+      sel.appendChild(custom);
+    }
+    sel.value = url;
+    $('forgetServerBtn').style.display = settings.servers.length > 1 ? '' : 'none';
+  }
+
+  // Host is what distinguishes these in practice; keep the path when there is one.
+  function serverLabel(base) {
+    try {
+      var u = new URL(base);
+      return u.host + (u.pathname === '/' ? '' : u.pathname);
+    } catch (e) { return base; }
+  }
+
+  $('setServer').addEventListener('change', function () {
+    $('setBase').value = this.value;
+    // The model list belongs to the old server; start from Auto again.
+    $('setModel').innerHTML = '';
+    detected = { model: null, how: null, available: [], at: 0 };
+    fillModelSelect();
+  });
+
+  // Typing in the box keeps the picker honest without waiting for a save.
+  $('setBase').addEventListener('change', function () {
+    fillServerSelect(this.value);
+  });
+
+  $('forgetServerBtn').addEventListener('click', function () {
+    var url = normalizeBase($('setBase').value);
+    var next = settings.servers.filter(function (u) { return u !== url; });
+    if (!next.length) return;
+    settings.servers = next;
+    if (settings.base === url) settings.base = next[0];
+    saveSettings();
+    $('setBase').value = next[0];
+    fillServerSelect(next[0]);
+  });
 
   // Auto first, then whatever the server advertises, then the saved value if it
   // is no longer in the list (so a hand-typed name is never silently dropped).
@@ -1630,10 +1723,13 @@
     var max = parseInt($('setMax').value, 10);
     var nextBase = normalizeBase($('setBase').value);
 
-    if (nextBase !== settings.base) detected = { model: null, how: null, available: [], at: 0 };
+    var switched = nextBase !== settings.base;
+    if (switched) detected = { model: null, how: null, available: [], at: 0 };
 
     settings.base = nextBase;
-    settings.model = $('setModel').value.trim();
+    settings.servers = sanitizeServers(settings.servers, nextBase);
+    // A model pinned on one server means nothing on another.
+    settings.model = switched ? '' : $('setModel').value.trim();
     settings.temperature = isNaN(temp) ? DEFAULTS.temperature : Math.min(2, Math.max(0, temp));
     settings.maxTokens = isNaN(max) || max < 1 ? DEFAULTS.maxTokens : max;
     settings.stream = $('setStream').checked;
@@ -1648,10 +1744,18 @@
 
     closeSettings();
     updateModelLabel();
+    updateBrand();
     render();
     checkStatus();
     input.focus();
   });
+
+  // With more than one server configured, the header says which one is in use.
+  function updateBrand() {
+    var host = serverLabel(settings.base).split('/')[0];
+    brandHost.textContent = '/ ' + host;
+    brandHost.title = settings.base;
+  }
 
   function updateModelLabel() {
     var name = settings.model
@@ -2204,6 +2308,7 @@
   autoGrow();
   updateSendState();
   updateModelLabel();
+  updateBrand();
   checkStatus();
   setInterval(checkStatus, 30000);
   input.focus();
